@@ -1,0 +1,399 @@
+#include <drogon/drogon.h>
+
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <memory>
+
+namespace fs = std::filesystem;
+
+int main()
+{
+    // ---------------------------------------------------------
+    // Enable Drogon request streaming
+    // ---------------------------------------------------------
+    Json::Value config;
+    config["app"]["enable_request_stream"] = true;
+
+    drogon::app().loadConfigJson(config);
+
+    // Drogon's normal default request limit is 1 MB.
+    // For our prototype allow uploads up to 100 GB.
+    drogon::app().setClientMaxBodySize(
+        100ULL * 1024ULL * 1024ULL * 1024ULL
+    );
+
+
+    // =========================================================
+    // GET /api/health
+    // =========================================================
+    drogon::app().registerHandler(
+        "/api/health",
+        [](const drogon::HttpRequestPtr& req,
+           std::function<void(const drogon::HttpResponsePtr&)>&& callback)
+        {
+            Json::Value json;
+            json["status"] = "ok";
+            json["service"] = "LanShare";
+
+            auto response =
+                drogon::HttpResponse::newHttpJsonResponse(json);
+
+            callback(response);
+        },
+        {drogon::Get}
+    );
+
+
+    // =========================================================
+    // POST /api/files
+    //
+    // Raw request body = file bytes
+    // Header:
+    //
+    // X-File-Name: example.zip
+    //
+    // =========================================================
+    drogon::app().registerHandler(
+        "/api/files",
+
+        [](const drogon::HttpRequestPtr& req,
+           drogon::RequestStreamPtr&& stream,
+           std::function<void(const drogon::HttpResponsePtr&)>&& callback)
+        {
+            // -------------------------------------------------
+            // Read filename
+            // -------------------------------------------------
+            std::string fileName =
+                req->getHeader("X-File-Name");
+
+            if (fileName.empty())
+            {
+                // We aren't interested in the incoming body anymore.
+                stream->setStreamReader(
+                    drogon::RequestStreamReader::newNullReader()
+                );
+
+                Json::Value json;
+                json["error"] =
+                    "X-File-Name header is required";
+
+                auto response =
+                    drogon::HttpResponse::newHttpJsonResponse(json);
+
+                response->setStatusCode(
+                    drogon::k400BadRequest
+                );
+
+                callback(response);
+                return;
+            }
+
+
+            // -------------------------------------------------
+            // Prevent path traversal
+            //
+            // Example malicious filename:
+            //
+            // ../../Windows/test.txt
+            //
+            // becomes:
+            //
+            // test.txt
+            // -------------------------------------------------
+            std::string safeFileName =
+                fs::path(fileName)
+                    .filename()
+                    .string();
+
+            if (safeFileName.empty())
+            {
+                stream->setStreamReader(
+                    drogon::RequestStreamReader::newNullReader()
+                );
+
+                Json::Value json;
+                json["error"] = "Invalid filename";
+
+                auto response =
+                    drogon::HttpResponse::newHttpJsonResponse(json);
+
+                response->setStatusCode(
+                    drogon::k400BadRequest
+                );
+
+                callback(response);
+                return;
+            }
+
+
+            // -------------------------------------------------
+            // received/
+            // -------------------------------------------------
+            fs::path receiveDirectory =
+                fs::current_path() / "received";
+
+            std::error_code directoryError;
+
+            fs::create_directories(
+                receiveDirectory,
+                directoryError
+            );
+
+            if (directoryError)
+            {
+                stream->setStreamReader(
+                    drogon::RequestStreamReader::newNullReader()
+                );
+
+                Json::Value json;
+                json["error"] =
+                    "Could not create receive directory";
+
+                auto response =
+                    drogon::HttpResponse::newHttpJsonResponse(json);
+
+                response->setStatusCode(
+                    drogon::k500InternalServerError
+                );
+
+                callback(response);
+                return;
+            }
+
+
+            fs::path destination =
+                receiveDirectory / safeFileName;
+
+
+            // -------------------------------------------------
+            // Shared state
+            //
+            // These objects must stay alive after this handler
+            // returns because chunks arrive asynchronously.
+            // -------------------------------------------------
+            auto output =
+                std::make_shared<std::ofstream>(
+                    destination,
+                    std::ios::binary |
+                    std::ios::trunc
+                );
+
+            if (!output->is_open())
+            {
+                stream->setStreamReader(
+                    drogon::RequestStreamReader::newNullReader()
+                );
+
+                Json::Value json;
+                json["error"] =
+                    "Could not create destination file";
+
+                auto response =
+                    drogon::HttpResponse::newHttpJsonResponse(json);
+
+                response->setStatusCode(
+                    drogon::k500InternalServerError
+                );
+
+                callback(response);
+                return;
+            }
+
+
+            auto bytesReceived =
+                std::make_shared<std::uint64_t>(0);
+
+            auto writeFailed =
+                std::make_shared<bool>(false);
+
+
+            // callback is an rvalue and the upload continues
+            // after this handler returns, so preserve it.
+            auto responseCallback =
+                std::make_shared<
+                    std::function<
+                        void(
+                            const drogon::HttpResponsePtr&
+                        )
+                    >
+                >(std::move(callback));
+
+
+            std::cout
+                << "Starting upload: "
+                << safeFileName
+                << std::endl;
+
+
+            // -------------------------------------------------
+            // Create streaming reader
+            // -------------------------------------------------
+            auto reader =
+                drogon::RequestStreamReader::newReader(
+
+                    // =========================================
+                    // Called every time another chunk arrives
+                    // =========================================
+                    [
+                        output,
+                        bytesReceived,
+                        writeFailed
+                    ]
+                    (
+                        const char* data,
+                        size_t size
+                    )
+                    {
+                        if (*writeFailed)
+                        {
+                            return;
+                        }
+
+                        output->write(
+                            data,
+                            static_cast<std::streamsize>(size)
+                        );
+
+                        if (!(*output))
+                        {
+                            *writeFailed = true;
+                            return;
+                        }
+
+                        *bytesReceived +=
+                            static_cast<std::uint64_t>(size);
+                    },
+
+
+                    // =========================================
+                    // Called when request body finishes
+                    // =========================================
+                    [
+                        output,
+                        bytesReceived,
+                        writeFailed,
+                        destination,
+                        safeFileName,
+                        responseCallback
+                    ]
+                    (
+                        std::exception_ptr exception
+                    )
+                    {
+                        output->close();
+
+
+                        // -------------------------------------
+                        // Connection/request failed
+                        // -------------------------------------
+                        if (exception)
+                        {
+                            std::error_code ec;
+
+                            // Don't keep incomplete files.
+                            fs::remove(destination, ec);
+
+                            Json::Value json;
+                            json["error"] =
+                                "Upload interrupted";
+
+                            auto response =
+                                drogon::HttpResponse::
+                                    newHttpJsonResponse(json);
+
+                            response->setStatusCode(
+                                drogon::k400BadRequest
+                            );
+
+                            (*responseCallback)(response);
+
+                            return;
+                        }
+
+
+                        // -------------------------------------
+                        // Disk write failed
+                        // -------------------------------------
+                        if (*writeFailed || !(*output))
+                        {
+                            std::error_code ec;
+                            fs::remove(destination, ec);
+
+                            Json::Value json;
+                            json["error"] =
+                                "Failed while writing file";
+
+                            auto response =
+                                drogon::HttpResponse::
+                                    newHttpJsonResponse(json);
+
+                            response->setStatusCode(
+                                drogon::
+                                    k500InternalServerError
+                            );
+
+                            (*responseCallback)(response);
+
+                            return;
+                        }
+
+
+                        std::cout
+                            << "Upload complete: "
+                            << safeFileName
+                            << " ("
+                            << *bytesReceived
+                            << " bytes)"
+                            << std::endl;
+
+
+                        // -------------------------------------
+                        // Success
+                        // -------------------------------------
+                        Json::Value json;
+
+                        json["status"] = "received";
+                        json["fileName"] =
+                            safeFileName;
+
+                        json["size"] =
+                            static_cast<Json::UInt64>(
+                                *bytesReceived
+                            );
+
+
+                        auto response =
+                            drogon::HttpResponse::
+                                newHttpJsonResponse(json);
+
+                        response->setStatusCode(
+                            drogon::k201Created
+                        );
+
+                        (*responseCallback)(response);
+                    }
+                );
+
+
+            // Start consuming incoming chunks
+            stream->setStreamReader(reader);
+        },
+
+        {drogon::Post}
+    );
+
+
+    std::cout
+        << "LanShare running on 0.0.0.0:8080"
+        << std::endl;
+
+
+    drogon::app()
+        .addListener("0.0.0.0", 8080)
+        .run();
+
+
+    return 0;
+}

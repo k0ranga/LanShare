@@ -32,9 +32,9 @@
 *.app
 
 # CMake build outputs
-/build/
-/CMakeFiles/
-CMakeCache.txt
+/backend/build/
+/backend/CMakeFiles/
+/backend/CMakeCache.txt
 CTestTestfile.cmake
 cmake_install.cmake
 

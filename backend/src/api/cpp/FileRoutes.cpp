@@ -1,42 +1,19 @@
-#include <drogon/drogon.h>
+#include "FileRoutes.h"
 
+#include "../../transfer/FileSender.h"
+
+#include <drogon/drogon.h>
 
 #include <filesystem>
 #include <fstream>
-#include <iostream>
+#include <memory>
+#include <cstdint>
 
 namespace fs = std::filesystem;
 
-int main(){
-
-    Json::Value config;
-    config["app"]["enable_request_stream"] = true;
-
-    drogon::app().loadConfigJson(config);
-
-    drogon::app().setClientMaxBodySize(
-        100ULL * 1024ULL * 1024ULL * 1024ULL
-    );
-
-
+void registerFileRoutes()
+{
     drogon::app().registerHandler(
-        "/api/health",
-        [](const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback){
-            Json::Value response;
-
-            response["status"] = "ok";
-            response["service"] = "LanShare";
-
-            auto httpResponse = drogon::HttpResponse::newHttpJsonResponse(response);
-
-
-            callback(httpResponse);
-        },
-        {drogon::Get}
-    );
-
-
-     drogon::app().registerHandler(
         "/api/files",
 
         [](const drogon::HttpRequestPtr& req,
@@ -310,8 +287,189 @@ int main(){
 
         {drogon::Post}
     );
-    std::cout << "LanShare running on port 8080\n";
-    drogon::app().addListener("0.0.0.0", 8080).run();
 
-    return 0;
+drogon::app().registerHandler(
+    "/api/send",
+
+    [](const drogon::HttpRequestPtr& req,
+       std::function<void(
+           const drogon::HttpResponsePtr&
+       )>&& callback)
+    {
+        auto json =
+            req->getJsonObject();
+
+        if (!json)
+        {
+            Json::Value responseJson;
+
+            responseJson["error"] =
+                "Invalid JSON body";
+
+            auto response =
+                drogon::HttpResponse::
+                    newHttpJsonResponse(
+                        responseJson
+                    );
+
+            response->setStatusCode(
+                drogon::k400BadRequest
+            );
+
+            callback(response);
+
+            return;
+        }
+
+
+        if (!json->isMember("targetIp") ||
+            !json->isMember("filePath"))
+        {
+            Json::Value responseJson;
+
+            responseJson["error"] =
+                "targetIp and filePath are required";
+
+            auto response =
+                drogon::HttpResponse::
+                    newHttpJsonResponse(
+                        responseJson
+                    );
+
+            response->setStatusCode(
+                drogon::k400BadRequest
+            );
+
+            callback(response);
+
+            return;
+        }
+
+
+        const std::string targetIp =
+            (*json)["targetIp"].asString();
+
+        const std::string filePath =
+            (*json)["filePath"].asString();
+
+
+        const int port =
+            json->get("port", 8080).asInt();
+
+
+        if (targetIp.empty() ||
+            filePath.empty())
+        {
+            Json::Value responseJson;
+
+            responseJson["error"] =
+                "targetIp and filePath cannot be empty";
+
+            auto response =
+                drogon::HttpResponse::
+                    newHttpJsonResponse(
+                        responseJson
+                    );
+
+            response->setStatusCode(
+                drogon::k400BadRequest
+            );
+
+            callback(response);
+
+            return;
+        }
+
+
+        if (port <= 0 || port > 65535)
+        {
+            Json::Value responseJson;
+
+            responseJson["error"] =
+                "Invalid port";
+
+            auto response =
+                drogon::HttpResponse::
+                    newHttpJsonResponse(
+                        responseJson
+                    );
+
+            response->setStatusCode(
+                drogon::k400BadRequest
+            );
+
+            callback(response);
+
+            return;
+        }
+        SendResult sendResult =
+            sendFileToPeer(
+                filePath,
+                targetIp,
+                port
+            );
+
+
+        Json::Value responseJson;
+
+
+        if (!sendResult.success)
+        {
+            responseJson["status"] = "failed";
+            responseJson["error"] =
+                sendResult.error;
+
+            responseJson["receiverStatus"] =
+                static_cast<int>(
+                    sendResult.httpStatus
+                );
+
+            auto response =
+                drogon::HttpResponse::
+                    newHttpJsonResponse(
+                        responseJson
+                    );
+
+            response->setStatusCode(
+                drogon::
+                    k500InternalServerError
+            );
+
+            callback(response);
+
+            return;
+        }
+
+
+        responseJson["status"] = "sent";
+
+        responseJson["targetIp"] =
+            targetIp;
+
+        responseJson["port"] =
+            port;
+
+        responseJson["filePath"] =
+            filePath;
+
+        responseJson["receiverStatus"] =
+            static_cast<int>(
+                sendResult.httpStatus
+            );
+
+        responseJson["receiverResponse"] =
+            sendResult.responseBody;
+
+
+        auto response =
+            drogon::HttpResponse::
+                newHttpJsonResponse(
+                    responseJson
+                );
+
+        callback(response);
+    },
+
+    {drogon::Post}
+);
 }

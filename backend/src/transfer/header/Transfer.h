@@ -44,12 +44,16 @@ struct Transfer
     std::string id;
 
     std::string fileName;
-
     std::uint64_t fileSize = 0;
     std::uint64_t bytesTransferred = 0;
 
+    std::string senderId;
     std::string senderName;
     std::string senderIp;
+
+    std::string receiverId;
+    std::string receiverName;
+    std::string receiverIp;
 
     TransferStatus status =
         TransferStatus::Pending;

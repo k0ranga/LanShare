@@ -10,8 +10,11 @@
 namespace fs = std::filesystem;
 
 
+
+
 void registerTransferRoutes()
 {
+    
     drogon::app().registerHandler(
         "/api/transfers/request",
 
@@ -24,10 +27,6 @@ void registerTransferRoutes()
         {
             auto json =
                 req->getJsonObject();
-
-
-        //    std::cout << json << std::endl;
-
 
             if (!json)
             {
@@ -48,8 +47,6 @@ void registerTransferRoutes()
 
                 return;
             }
-
-
             if (!json->isMember("fileName") ||
                 !json->isMember("fileSize"))
             {
@@ -326,6 +323,107 @@ void registerTransferRoutes()
         callback(response);
     },
 
-    {drogon::Post}
+        {drogon::Post}
+    );
+
+
+
+
+    drogon::app().registerHandler(
+    "/api/transfers/status",
+
+    [](
+        const drogon::HttpRequestPtr& req,
+        std::function<void(
+            const drogon::HttpResponsePtr&
+        )>&& callback
+    )
+    {
+        const std::string transferId =
+            req->getParameter("id");
+
+        if (transferId.empty())
+        {
+            Json::Value result;
+
+            result["error"] =
+                "id parameter is required";
+
+            auto response =
+                drogon::HttpResponse::
+                    newHttpJsonResponse(result);
+
+            response->setStatusCode(
+                drogon::k400BadRequest
+            );
+
+            callback(response);
+            return;
+        }
+
+
+        auto transfer =
+            TransferManager::instance()
+                .getTransfer(transferId);
+
+
+        if (!transfer)
+        {
+            Json::Value result;
+
+            result["error"] =
+                "Transfer not found";
+
+            auto response =
+                drogon::HttpResponse::
+                    newHttpJsonResponse(result);
+
+            response->setStatusCode(
+                drogon::k404NotFound
+            );
+
+            callback(response);
+            return;
+        }
+
+
+        Json::Value result;
+
+        result["transferId"] =
+            transfer->id;
+
+        result["fileName"] =
+            transfer->fileName;
+
+        result["fileSize"] =
+            static_cast<Json::UInt64>(
+                transfer->fileSize
+            );
+
+        result["bytesTransferred"] =
+            static_cast<Json::UInt64>(
+                transfer->bytesTransferred
+            );
+
+        result["senderName"] =
+            transfer->senderName;
+
+        result["senderIp"] =
+            transfer->senderIp;
+
+        result["status"] =
+            transferStatusToString(
+                transfer->status
+            );
+
+
+        auto response =
+            drogon::HttpResponse::
+                newHttpJsonResponse(result);
+
+        callback(response);
+    },
+
+    {drogon::Get}
 );
 }

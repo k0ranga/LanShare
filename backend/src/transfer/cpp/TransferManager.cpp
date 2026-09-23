@@ -78,6 +78,33 @@ Transfer TransferManager::createTransfer(
 
 
 std::optional<Transfer>
+TransferManager::updateStatus(
+    const std::string& transferId,
+    TransferStatus expectedStatus,
+    TransferStatus newStatus
+)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto it = transfers_.find(transferId);
+
+    if (it == transfers_.end())
+    {
+        return std::nullopt;
+    }
+
+    // Only allow the expected state transition.
+    if (it->second.status != expectedStatus)
+    {
+        return std::nullopt;
+    }
+
+    it->second.status = newStatus;
+
+    return it->second;
+}
+
+std::optional<Transfer>
 TransferManager::getTransfer(
     const std::string& transferId
 )

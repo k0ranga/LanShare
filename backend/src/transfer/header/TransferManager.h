@@ -23,6 +23,11 @@ public:
         const std::string& transferId
     );
 
+    std::optional<Transfer> updateStatus(
+        const std::string& transferId,
+        TransferStatus expectedStatus,
+        TransferStatus newStatus
+    );
 private:
     TransferManager() = default;
 

@@ -21,6 +21,7 @@ add_executable(
     src/api/cpp/TransferRoutes.cpp
 
     src/transfer/cpp/TransferManager.cpp
+    src/transfer/cpp/TransferClient.cpp
 )
 
 
